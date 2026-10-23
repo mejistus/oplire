@@ -11,7 +11,8 @@ _|"""""|_| """ |_|"""""|_|"""""|_|"""""|_|"""""|
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-orange?style=flat-square&logo=rust)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
-[![AUR](https://img.shields.io/badge/AUR-2.1.0-blue?style=flat-square)](https://aur.archlinux.org/packages/oplire)
+[![AUR](https://img.shields.io/badge/AUR-2.4.0-blue?style=flat-square)](https://aur.archlinux.org/packages/oplire)
+[![macOS](https://img.shields.io/badge/macOS-Homebrew-5c5c5c?style=flat-square&logo=homebrew)](https://github.com/mejistus/homebrew-mona)
 
 ## What is oplire?
 
@@ -25,9 +26,13 @@ _|"""""|_| """ |_|"""""|_|"""""|_|"""""|_|"""""|
 #### WARP Reset Mode
 OpenCode tracks users by IP. When you hit the rate limit:
 1. **Stops** the current WARP tunnel
-2. **Clears** cached session data
+2. **Clears cached session data** (Linux: wipes `/var/lib/cloudflare-warp`)
 3. **Creates** a new tunnel registration (new IP)
 4. **Restarts** WARP with a fresh IP
+
+On macOS the WARP client runs as a launchd daemon inside the app bundle, so
+there is no systemd unit or on-disk cache to clear — the tunnel is rotated
+through the CLI alone: `disconnect` → `registration new` → `connect`.
 
 #### Proxy Bridge Mode
 Claude Code → oplire proxy (127.0.0.1:8080) → OpenCode Zen
@@ -48,14 +53,23 @@ yay -S oplire
 winget install BerkeOruc.oplire
 ```
 
-### macOS
+### macOS (Homebrew)
 ```bash
-brew install berkeoruc/oplire/oplire
+brew install mejistus/mona/oplire
 ```
+
+Requires the Cloudflare WARP client for the rate limit reset feature:
+```bash
+brew install --cask cloudflare-warp
+```
+
+On macOS the WARP client is a GUI application bundle, so `oplire` resolves
+`warp-cli` from `/Applications/Cloudflare WARP.app/Contents/SharedSupport/`
+automatically — no `PATH` changes needed.
 
 ### From Source
 ```bash
-git clone https://github.com/BerkeOruc/oplire.git
+git clone https://github.com/mejistus/oplire.git
 cd oplire
 cargo build --release
 sudo cp target/release/oplire /usr/bin/oplire
@@ -152,12 +166,12 @@ When connected through the proxy, these models appear in Claude Code's `/models`
 ## About
 
 ```
-Version: 2.1.0
+Version: 2.5.0
 Language: Rust
 Purpose: OpenCode rate limit reset + Anthropic proxy
 Infrastructure: Cloudflare WARP + Axum HTTP
 Author: Berke Oruc
-GitHub: https://github.com/BerkeOruc/oplire
+GitHub: https://github.com/mejistus/oplire
 ```
 
 ## License

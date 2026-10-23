@@ -1,12 +1,12 @@
 [package]
 name = "oplire-reset"
-version = "2.4.0"
+version = "2.5.0"
 edition = "2021"
 description = "OpenCode Limit Reset + Anthropic Proxy Bridge"
 authors = ["Berke Oruc"]
 license = "MIT"
-repository = "https://github.com/berkeoruc/oplire"
-homepage = "https://github.com/berkeoruc/oplire"
+repository = "https://github.com/mejistus/oplire"
+homepage = "https://github.com/mejistus/oplire"
 
 [[bin]]
 name = "oplire"

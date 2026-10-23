@@ -1,8 +1,9 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
-use tokio::process::Command;
 use tokio::sync::Mutex;
 use tracing::{info, warn, error};
+
+use super::cli;
 
 static ACTIVE_429_COUNT: AtomicU32 = AtomicU32::new(0);
 static RESET_IN_PROGRESS: Mutex<()> = Mutex::const_new(());
@@ -57,6 +58,41 @@ impl WarpResolver {
     }
 
     async fn reset_warp(&self) -> Result<(), String> {
+        if cfg!(target_os = "macos") {
+            self.reset_warp_macos().await
+        } else {
+            self.reset_warp_linux().await
+        }
+    }
+
+    /// macOS runs the WARP client as a launchd daemon inside the app bundle.
+    ///
+    /// There is no `warp-svc` systemd unit and no `/var/lib/cloudflare-warp`
+    /// cache to wipe, so the tunnel is rotated purely through the CLI:
+    /// disconnect, re-register to obtain a fresh identity, then reconnect.
+    async fn reset_warp_macos(&self) -> Result<(), String> {
+        info!("Step 1: warp-cli disconnect");
+        run_warp_command(&["disconnect"]).await?;
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+
+        info!("Step 2: warp-cli registration new");
+        run_warp_command(&["registration", "new"]).await?;
+
+        tokio::time::sleep(Duration::from_millis(1000)).await;
+
+        info!("Step 3: warp-cli connect");
+        run_warp_command(&["connect"]).await?;
+
+        info!("WARP tunnel reset complete");
+        Ok(())
+    }
+
+    /// Linux runs the WARP client as the `warp-svc` systemd unit.
+    ///
+    /// The unit is stopped and its on-disk state wiped before a new
+    /// registration is created, which is what forces a fresh tunnel.
+    async fn reset_warp_linux(&self) -> Result<(), String> {
         info!("Step 1: warp-cli disconnect");
         run_warp_command(&["disconnect"]).await?;
 
@@ -102,22 +138,19 @@ impl WarpResolver {
 }
 
 async fn run_warp_command(args: &[&str]) -> Result<(), String> {
-    let output = Command::new("warp-cli")
-        .args(args)
-        .output()
-        .await
-        .map_err(|e| format!("Failed to execute warp-cli: {}", e))?;
+    // `spawn_blocking` requires a `'static` closure, so the arguments are
+    // copied into owned strings first.
+    let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
 
-    if output.status.success() {
-        Ok(())
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        Err(format!("warp-cli {:?} failed: {}", args, stderr.trim()))
-    }
+    let output = tokio::task::spawn_blocking(move || cli::run_warp_cli(&args))
+        .await
+        .map_err(|e| format!("warp-cli task failed: {}", e))?;
+
+    output.map(|_| ())
 }
 
 async fn run_sudo_command(cmd: &str) -> Result<(), String> {
-    let output = Command::new("sudo")
+    let output = tokio::process::Command::new("sudo")
         .arg("-n")
         .arg("sh")
         .arg("-c")

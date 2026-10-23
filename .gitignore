@@ -1,5 +1,7 @@
 /target
-/Cargo.lock
+
+# Cargo.lock is committed on purpose: oplire ships a binary, and a pinned
+# lockfile keeps Homebrew builds reproducible.
 
 # IDE
 .idea/

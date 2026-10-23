@@ -1,11 +1,12 @@
 use clap::{Parser, Subcommand};
 use colored::Colorize;
+use oplire_reset::warp::cli;
 use oplire_reset::{ProxyConfig, AppConfig};
 use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
-const VERSION: &str = "2.4.0";
+const VERSION: &str = "2.5.0";
 
 #[derive(Parser, Debug)]
 #[command(name = "oplire")]
@@ -186,7 +187,7 @@ fn save_config(config: &AppConfig) -> Result<(), String> {
 }
 
 fn check_warp_installed() -> bool {
-    Command::new("warp-cli").arg("--version").output().is_ok()
+    cli::warp_installed()
 }
 
 fn check_claude_installed() -> bool {
@@ -277,6 +278,30 @@ fn run_sudo_command(cmd: &str, dry_run: bool, verbose: bool) -> Result<String, S
         } else {
             Err(String::from_utf8_lossy(&output.stderr).to_string())
         }
+    }
+}
+
+/// Run a `warp-cli` subcommand using the platform-appropriate binary and
+/// flags.
+///
+/// On macOS `warp-cli` lives inside the application bundle and needs
+/// `--accept-tos`; on Linux it is a plain binary on `PATH`.
+fn run_warp_command(args: &[&str], dry_run: bool, verbose: bool) -> Result<String, String> {
+    let rendered = cli::warp_cli_args(args).join(" ");
+
+    if dry_run {
+        if verbose {
+            eprintln!(
+                "{} Would execute: warp-cli {}",
+                "[DRY-RUN]".cyan(),
+                rendered
+            );
+        } else {
+            eprintln!("{} warp-cli {}", "[DRY-RUN]".cyan(), rendered);
+        }
+        Ok(format!("[DRY-RUN] Would execute: warp-cli {}", rendered))
+    } else {
+        cli::run_warp_cli(args)
     }
 }
 
@@ -585,7 +610,22 @@ fn main() {
                     return;
                 }
 
-                if let Ok(output) = Command::new("sh").arg("-c").arg("cat /etc/os-release").output() {
+                if cfg!(target_os = "macos") {
+                    print_step(1, "Installing Cloudflare WARP via Homebrew...");
+                    match run_interactive("brew", &["install", "--cask", "cloudflare-warp"]) {
+                        Ok(()) => print_success("WARP installed"),
+                        Err(e) => {
+                            print_fail(&format!("Installation failed: {}", e));
+                            println!();
+                            println!("{} Install it manually:", "Fix:".cyan());
+                            println!(
+                                "  {}",
+                                "https://developers.cloudflare.com/warp-client/get-started/macos/"
+                                    .dimmed()
+                            );
+                        }
+                    }
+                } else if let Ok(output) = Command::new("sh").arg("-c").arg("cat /etc/os-release").output() {
                     let os_release = String::from_utf8_lossy(&output.stdout);
 
                     if os_release.contains("arch") || os_release.contains("manjaro") {
@@ -645,8 +685,9 @@ fn main() {
                 if check_warp_installed() {
                     println!();
                     println!("{}", "Next steps:".bold());
-                    println!("  1. {}", "warp-cli connect".bold().yellow());
-                    println!("  2. {}", "warp-cli status".bold().yellow());
+                    let warp_cli = cli::warp_cli_display();
+                    println!("  1. {}", format!("{} connect", warp_cli).bold().yellow());
+                    println!("  2. {}", format!("{} status", warp_cli).bold().yellow());
                     println!("  3. {}", "oplire reset".bold().yellow());
                 } else {
                     println!();
@@ -952,7 +993,11 @@ fn main() {
             let mut checks = Vec::new();
 
             if warp_installed {
-                checks.push(("WARP CLI", "installed".to_string(), true));
+                checks.push((
+                    "WARP CLI",
+                    format!("installed ({})", cli::warp_cli_display()),
+                    true,
+                ));
             } else {
                 checks.push(("WARP CLI", "NOT FOUND".to_string(), false));
                 all_ok = false;
@@ -1029,22 +1074,17 @@ fn main() {
             if cli.verbose {
                 eprintln!("{} Disconnecting...", "[DEBUG]".cyan());
             }
-            let _ = run_command("warp-cli", &["disconnect"], cli.dry_run, cli.verbose);
+            let _ = run_warp_command(&["disconnect"], cli.dry_run, cli.verbose);
 
             if cli.verbose {
                 eprintln!("{} Registration new...", "[DEBUG]".cyan());
             }
-            let _ = run_command(
-                "warp-cli",
-                &["registration", "new"],
-                cli.dry_run,
-                cli.verbose,
-            );
+            let _ = run_warp_command(&["registration", "new"], cli.dry_run, cli.verbose);
 
             if cli.verbose {
                 eprintln!("{} Connecting...", "[DEBUG]".cyan());
             }
-            let _ = run_command("warp-cli", &["connect"], cli.dry_run, cli.verbose);
+            let _ = run_warp_command(&["connect"], cli.dry_run, cli.verbose);
 
             println!("{}", "Quick reset complete!".green().bold());
         }
@@ -1161,11 +1201,12 @@ fn main() {
 
             println!("{}", "Checking tunnel status...".dimmed());
 
-            match run_command("warp-cli", &["status"], cli.dry_run, cli.verbose) {
+            match run_warp_command(&["status"], cli.dry_run, cli.verbose)
+                .or_else(|_| run_warp_command(&["settings"], cli.dry_run, cli.verbose))
+            {
                 Ok(output) => {
                     let status_str = output.trim();
-                    let connected =
-                        status_str.contains("Connected") || status_str.contains("connected");
+                    let connected = cli::parse_connected(status_str);
 
                     if *json {
                         let tunnel_id = if connected { "active" } else { "null" };
@@ -1220,41 +1261,51 @@ fn main() {
             if cli.verbose {
                 eprintln!("{} Step 1: Disconnecting...", "[DEBUG]".cyan());
             }
-            let _ = run_command("warp-cli", &["disconnect"], cli.dry_run, cli.verbose);
+            let _ = run_warp_command(&["disconnect"], cli.dry_run, cli.verbose);
 
-            if cli.verbose {
-                eprintln!("{} Step 2: Stopping warp-svc...", "[DEBUG]".cyan());
-            }
-            let _ = run_sudo_command("systemctl stop warp-svc", cli.dry_run, cli.verbose);
+            if cfg!(target_os = "macos") {
+                // macOS runs the WARP client as a launchd daemon inside the app
+                // bundle. There is no systemd unit and no on-disk cache to
+                // wipe, so the tunnel is rotated purely through the CLI.
+                if cli.verbose {
+                    eprintln!("{} Step 2: Registering new tunnel...", "[DEBUG]".cyan());
+                }
+                let _ = run_warp_command(&["registration", "new"], cli.dry_run, cli.verbose);
 
-            if cli.verbose {
-                eprintln!("{} Step 3: Clearing cache...", "[DEBUG]".cyan());
-            }
-            let _ = run_sudo_command(
-                "rm -rf /var/lib/cloudflare-warp/*",
-                cli.dry_run,
-                cli.verbose,
-            );
+                if cli.verbose {
+                    eprintln!("{} Step 3: Connecting...", "[DEBUG]".cyan());
+                }
+                let _ = run_warp_command(&["connect"], cli.dry_run, cli.verbose);
+            } else {
+                if cli.verbose {
+                    eprintln!("{} Step 2: Stopping warp-svc...", "[DEBUG]".cyan());
+                }
+                let _ = run_sudo_command("systemctl stop warp-svc", cli.dry_run, cli.verbose);
 
-            if cli.verbose {
-                eprintln!("{} Step 4: Starting warp-svc...", "[DEBUG]".cyan());
-            }
-            let _ = run_sudo_command("systemctl start warp-svc", cli.dry_run, cli.verbose);
+                if cli.verbose {
+                    eprintln!("{} Step 3: Clearing cache...", "[DEBUG]".cyan());
+                }
+                let _ = run_sudo_command(
+                    "rm -rf /var/lib/cloudflare-warp/*",
+                    cli.dry_run,
+                    cli.verbose,
+                );
 
-            if cli.verbose {
-                eprintln!("{} Step 5: Registering new tunnel...", "[DEBUG]".cyan());
-            }
-            let _ = run_command(
-                "warp-cli",
-                &["registration", "new"],
-                cli.dry_run,
-                cli.verbose,
-            );
+                if cli.verbose {
+                    eprintln!("{} Step 4: Starting warp-svc...", "[DEBUG]".cyan());
+                }
+                let _ = run_sudo_command("systemctl start warp-svc", cli.dry_run, cli.verbose);
 
-            if cli.verbose {
-                eprintln!("{} Step 6: Connecting...", "[DEBUG]".cyan());
+                if cli.verbose {
+                    eprintln!("{} Step 5: Registering new tunnel...", "[DEBUG]".cyan());
+                }
+                let _ = run_warp_command(&["registration", "new"], cli.dry_run, cli.verbose);
+
+                if cli.verbose {
+                    eprintln!("{} Step 6: Connecting...", "[DEBUG]".cyan());
+                }
+                let _ = run_warp_command(&["connect"], cli.dry_run, cli.verbose);
             }
-            let _ = run_command("warp-cli", &["connect"], cli.dry_run, cli.verbose);
 
             println!("{}", "WARP tunnel reset complete!".green().bold());
             println!("{} Run `oplire status` to verify", "Tip:".cyan());
@@ -1272,17 +1323,20 @@ fn main() {
             if cli.verbose {
                 eprintln!("{} Step 1: Disconnecting...", "[DEBUG]".cyan());
             }
-            let _ = run_command("warp-cli", &["disconnect"], cli.dry_run, cli.verbose);
+            let _ = run_warp_command(&["disconnect"], cli.dry_run, cli.verbose);
 
-            if cli.verbose {
-                eprintln!("{} Step 2: Stopping warp-svc...", "[DEBUG]".cyan());
-            }
-            let _ = run_sudo_command("systemctl stop warp-svc", cli.dry_run, cli.verbose);
+            if !cfg!(target_os = "macos") {
+                // The macOS client has no `warp-svc` systemd unit to stop.
+                if cli.verbose {
+                    eprintln!("{} Step 2: Stopping warp-svc...", "[DEBUG]".cyan());
+                }
+                let _ = run_sudo_command("systemctl stop warp-svc", cli.dry_run, cli.verbose);
 
-            if cli.verbose {
-                eprintln!("{} Step 3: Disabling warp-svc...", "[DEBUG]".cyan());
+                if cli.verbose {
+                    eprintln!("{} Step 3: Disabling warp-svc...", "[DEBUG]".cyan());
+                }
+                let _ = run_sudo_command("systemctl disable warp-svc", cli.dry_run, cli.verbose);
             }
-            let _ = run_sudo_command("systemctl disable warp-svc", cli.dry_run, cli.verbose);
 
             println!("{}", "WARP tunnel stopped!".green().bold());
             println!("{} Run `oplire reset` to restart", "Tip:".cyan());
